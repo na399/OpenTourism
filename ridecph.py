@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import pandas as pd
+import numpy as np
 import utm
 from bokeh.io import output_file, show
 from bokeh.models import (
@@ -13,6 +14,24 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import os
 import json
+
+from sklearn.model_selection import train_test_split
+import math
+from sklearn.feature_selection import SelectKBest
+from sklearn.pipeline import Pipeline
+from sklearn.decomposition import PCA
+from sklearn.grid_search import GridSearchCV
+from sklearn.pipeline import FeatureUnion
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, AdaBoostRegressor
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import cross_val_score
+from sklearn.cross_validation import KFold
+from sklearn.metrics import mean_squared_error, median_absolute_error
+import xgboost as xgb
+
+from sklearn.linear_model import Ridge, RidgeCV, ElasticNet, LassoCV, LassoLarsCV
+from sklearn.model_selection import cross_val_score
 
 GMAPS_KEY = 'your API key here'
 
@@ -135,9 +154,9 @@ def plot_(df_ID, ylim_max=False):
     sns.set_style("whitegrid")
     g=sns.swarmplot(x='hour', y='count', data=df_ID)
     if ylim_max:
-        g.set(xlabel="Hour within a Day", ylabel="Number of Cyclists passing the Counter", ylim=(0,max_count+100))
+        g.set(xlabel="Hour of the Day", ylabel="Number of Cyclists passing the Counter", ylim=(0,max_count+100))
     else:
-        g.set(xlabel="Hour within a Day", ylabel="Number of Cyclists passing the Counter")
+        g.set(xlabel="Hour of the Day", ylabel="Number of Cyclists passing the Counter")
     pass
 
 if BDAY:
@@ -202,18 +221,190 @@ df_withweather.tempm.describe()
 df_withweather['temp_cut'] = pd.cut(df_withweather.tempm, [-10, 5, 15, 30])
 df_withweather['wspd_cut'] = pd.cut(df_withweather.wspdm, [0, 10, 25, 55])
 
-def plot_weather(df_withweather):
+def plot_weather(df_withweather, cut):
     plt.rcParams['figure.figsize']=(10,8)
     plt.rcParams['font.size']=14
     sns.set_palette("muted")
     sns.set_style("whitegrid")
-    g1 = sns.swarmplot(x='hour', y='count', hue='temp_cut', data=df_withweather)
-    g1.set(xlabel="Hour within a Day", ylabel="Number of Cyclists passing the Counter")
+    g = sns.swarmplot(x='hour', y='count', hue=cut, data=df_withweather)
+    g.set(xlabel="Hour of the Day", ylabel="Number of Cyclists passing the Counter")
     plt.show()
     
-    plt.clf()
-    g2=sns.swarmplot(x='hour', y='count', hue='wspd_cut', data=df_withweather)
-    g2.set(xlabel="Hour within a Day", ylabel="Number of Cyclists passing the Counter")
-    plt.show()
+plot_weather(df_withweather, 'temp_cut')
+plot_weather(df_withweather, 'wspd_cut')
 
-plot_weather(df_withweather)
+
+# Correlation analysis
+corrMatt = df_withweather[["dewptm","hum","pressurem","rain","snow","tempm","vism","wspdm","count"]].corr()
+mask = np.array(corrMatt)
+mask[np.tril_indices_from(mask)] = False
+fig,ax= plt.subplots()
+fig.set_size_inches(20,10)
+sns.heatmap(corrMatt, mask=mask,vmax=.8, square=True,annot=True)
+
+
+# Create dataset for ML
+df_conds = pd.get_dummies(df_withweather.conds)
+df_dataset = pd.merge(df_withweather, df_conds, left_index=True, right_index=True)
+df_data_subset = df_dataset[["date_hour","hour","tempm","hum","wspdm",
+                             "Clear","Drizzle","Fog","Light Drizzle",
+                             "Light Rain","Light Rain Showers","Light Snow",
+                             "Mist", "Mostly Cloudy", "Overcast", "Partly Cloudy",
+                             "Rain", "Rain Showers", "Scattered Clouds", "Snow",
+                             "count"]]
+df_data_subset.hour = df_data_subset.hour.astype(int)
+labels = df_data_subset["count"]
+train = df_data_subset.drop(["date_hour","count"], 1)
+
+# https://www.kaggle.com/currie32/a-model-to-predict-number-of-daily-trips
+# Train the model
+
+X_train, X_test, y_train, y_test = train_test_split(train, labels, test_size=0.2, random_state = 2)
+
+#15 fold cross validation. Multiply by -1 to make values positive.
+#Used median absolute error to learn how many trips my predictions are off by.
+
+def scoring(clf):
+    scores = cross_val_score(clf, X_train, y_train, cv=15, n_jobs=-1, scoring = 'neg_median_absolute_error')
+    print (np.median(scores) * -1)
+    
+    
+rfr = RandomForestRegressor(n_estimators = 55,
+                            min_samples_leaf = 3,
+                            random_state = 2,
+                            n_jobs = -1)
+scoring(rfr)
+
+gbr = GradientBoostingRegressor(learning_rate = 0.12,
+                                n_estimators = 150,
+                                max_depth = 8,
+                                min_samples_leaf = 1,
+                                random_state = 2)
+scoring(gbr)
+
+dtr = DecisionTreeRegressor(min_samples_leaf = 3,
+                            max_depth = 8,
+                            random_state = 2)
+scoring(dtr)
+
+abr = AdaBoostRegressor(n_estimators = 100,
+                        learning_rate = 0.1,
+                        loss = 'linear',
+                        random_state = 2)
+scoring(abr)
+
+
+# XGBoost
+
+import warnings
+warnings.filterwarnings("ignore")
+
+random_state = 2
+params = {
+        'eta': 0.15,
+        'max_depth': 6,
+        'min_child_weight': 2,
+        'subsample': 1,
+        'colsample_bytree': 1,
+        'verbose_eval': True,
+        'seed': random_state,
+    }
+
+n_folds = 15 #number of Kfolds
+cv_scores = [] #The sum of the mean_absolute_error for each fold.
+early_stopping_rounds = 100
+iterations = 10000
+printN = 50
+fpred = [] #stores the sums of predicted values for each fold.
+
+testFinal = xgb.DMatrix(X_test)
+
+kf = KFold(len(X_train), n_folds=n_folds)
+
+for i, (train_index, test_index) in enumerate(kf):
+    print('\n Fold %d' % (i+1))
+    Xtrain, Xval = X_train.iloc[train_index], X_train.iloc[test_index]
+    Ytrain, Yval = y_train.iloc[train_index], y_train.iloc[test_index]
+    
+    xgtrain = xgb.DMatrix(Xtrain, label = Ytrain)
+    xgtest = xgb.DMatrix(Xval, label = Yval)
+    watchlist = [(xgtrain, 'train'), (xgtest, 'eval')] 
+    
+    xgbModel = xgb.train(params, 
+                         xgtrain, 
+                         iterations, 
+                         watchlist,
+                         verbose_eval = printN,
+                         early_stopping_rounds=early_stopping_rounds
+                        )
+    
+    scores_val = xgbModel.predict(xgtest, ntree_limit=xgbModel.best_ntree_limit)
+    cv_score = median_absolute_error(Yval, scores_val)
+    print('eval-MSE: %.6f' % cv_score)
+    y_pred = xgbModel.predict(testFinal, ntree_limit=xgbModel.best_ntree_limit)
+    print(xgbModel.best_ntree_limit)
+
+    if i > 0:
+        fpred = pred + y_pred #sum predictions
+    else:
+        fpred = y_pred
+    pred = fpred
+    cv_scores.append(cv_score)
+
+xgb_preds = pred / n_folds #find the average values for the predictions
+score = np.median(cv_scores)
+print('Median error: %.6f' % score)
+
+
+#Train and make predictions with the best models.
+rfr = rfr.fit(X_train, y_train)
+gbr = gbr.fit(X_train, y_train)
+
+rfr_preds = rfr.predict(X_test)
+gbr_preds = gbr.predict(X_test)
+
+#Weight the top models to find the best prediction
+final_preds = rfr_preds*0.325 + gbr_preds*0.331 + xgb_preds*0.344
+print ("hourly error of count:", median_absolute_error(y_test, final_preds))
+
+#Create a plot that ranks the features by importance.
+def plot_importances(model, model_name):
+    importances = model.feature_importances_
+    std = np.std([model.feature_importances_ for feature in model.estimators_],
+                 axis=0)
+    indices = np.argsort(importances)[::-1]    
+
+    # Plot the feature importances of the forest
+    plt.figure(figsize = (8,5))
+    plt.title("Feature importances of " + model_name)
+    plt.bar(range(X_train.shape[1]), importances[indices], color="r", align="center")
+    plt.xticks(range(X_train.shape[1]), indices)
+    plt.xlim([-1, X_train.shape[1]])
+    plt.show()
+    
+# Print the feature ranking
+print("Feature ranking:")
+
+i = 0
+for feature in X_train:
+    print (i, feature)
+    i += 1
+    
+plot_importances(rfr, "Random Forest Regressor")
+plot_importances(gbr, "Gradient Boosting Regressor")
+
+
+fig,(ax1,ax2)= plt.subplots(ncols=2)
+fig.set_size_inches(12,5)
+sns.distplot(y_test,ax=ax1,bins=50)
+sns.distplot(final_preds,ax=ax2,bins=50)
+
+# https://www.kaggle.com/apapiu/regularized-linear-models
+# LASSO model
+
+model_lasso = LassoCV(alphas = [1, 0.1, 0.001, 0.0005]).fit(X_train, y_train)
+
+coef = pd.Series(model_lasso.coef_, index = X_train.columns)
+
+coef.sort_values().plot(kind = "barh")
+plt.title("Coefficients in the Lasso Model")
