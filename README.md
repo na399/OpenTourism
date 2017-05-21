@@ -22,13 +22,9 @@ How does tempeature affects the number?
 ### The decomposition of relative index of Google search for 'bike rental' in Copenhagen and Amsterdam
 *Data from Google Trends https://trends.google.com/trends/explore?q=copenhagen%20bike%20rental,amsterdam%20bike%20rental*
 
-**NB** The scales are not the same. 
+  
+![Bike rental search](out/gtrends_bikerental.png)
 
-Copenhagen  
-![Copenhagen](out/tf_Copenhagen.png)
-
-Amsterdam  
-![Amsterdam](out/tf_Amsterdam.png)
 
 
 ### GoBike Usage
