@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 
 import pandas as pd
-import numpy as np
 import utm
 from bokeh.io import output_file, show
 from bokeh.models import (
@@ -18,7 +17,7 @@ import json
 GMAPS_KEY = 'your API key here'
 
 MAP = False
-BDAY = True
+BDAY = False
 WEATHER = False
 
 # Load the Excel file stats from bike counters
@@ -49,17 +48,17 @@ df_bikes.isnull().sum()
 df_bikes.date = pd.to_datetime(df_bikes.date, format='%d.%m.%Y')
 
 
+# Convert utm to latlon
+def to_lat(X, Y):
+    return utm.to_latlon(X,Y,32,'U')[0]
+def to_lon(X, Y):
+    return utm.to_latlon(X,Y,32,'U')[1]
+
+df_bikes['lat'] = map(to_lat, df_bikes.X, df_bikes.Y)
+df_bikes['lon'] = map(to_lon, df_bikes.X, df_bikes.Y)
 
 if MAP:
 
-    # Convert utm to latlon
-    def to_lat(X, Y):
-        return utm.to_latlon(X,Y,32,'U')[0]
-    def to_lon(X, Y):
-        return utm.to_latlon(X,Y,32,'U')[1]
-
-    df_bikes['lat'] = map(to_lat, df_bikes.X, df_bikes.Y)
-    df_bikes['lon'] = map(to_lon, df_bikes.X, df_bikes.Y)
 
     list_lat = df_bikes.lat.unique().tolist()
     list_lon = df_bikes.lon.unique().tolist()
@@ -175,23 +174,46 @@ if WEATHER:
             #hour['mon']  = mon_
             #hour['date'] = date
             index_ = datetime.datetime.strptime(date+hour_, '%Y%m%d%H').strftime('%Y-%m-%d %H:00:00')
-            hour['hour'] = index_
+            hour['date_hour'] = index_
             df_holder = pd.DataFrame(hour, index=[index_])
             df_weather = pd.concat([df_weather, df_holder])
 
     df_weather.to_csv('data/weather'+date[0:4]+'.csv')
-    df_weather.hour = pd.to_datetime(df_weather.hour, format='%Y-%m-%d %H:%M:%S')
+    df_weather.date_hour = pd.to_datetime(df_weather.date_hour, format='%Y-%m-%d %H:%M:%S')
 else:
     df_weather = pd.read_csv('data/weather2014.csv')
-    df_weather.hour = pd.to_datetime(df_weather.hour, format='%Y-%m-%d %H:%M:%S')
+    df_weather.date_hour = pd.to_datetime(df_weather.date_hour, format='%Y-%m-%d %H:%M:%S')
 
-plot_(df_Torvegade_non_bday)
+df_Torvegade_non_bday = make_df_ID('101 1017592-0 0/ 635 T', non_bday=True)
+# plot_(df_Torvegade_non_bday)
 df_ = df_Torvegade_non_bday
 
 
 def get_date_h(date, hour):
     return date + pd.DateOffset(hours=hour)
 
-df_['dath_h'] = map(get_date_h, df_.date, df_.hour)
+df_['date_hour'] = map(get_date_h, df_.date, df_.hour)
 
-df_weather.hour = pd.to_datetime(df_weather.hour, format='%Y-%m-%d %H:%M:%S')
+
+df_withweather = pd.merge(df_, df_weather, on="date_hour")
+
+df_withweather.tempm = df_withweather.tempm.astype(int)
+df_withweather.tempm.describe()
+df_withweather['temp_cut'] = pd.cut(df_withweather.tempm, [-10, 5, 15, 30])
+df_withweather['wspd_cut'] = pd.cut(df_withweather.wspdm, [0, 10, 25, 55])
+
+def plot_weather(df_withweather):
+    plt.rcParams['figure.figsize']=(10,8)
+    plt.rcParams['font.size']=14
+    sns.set_palette("muted")
+    sns.set_style("whitegrid")
+    g1 = sns.swarmplot(x='hour', y='count', hue='temp_cut', data=df_withweather)
+    g1.set(xlabel="Hour within a Day", ylabel="Number of Cyclists passing the Counter")
+    plt.show()
+    
+    plt.clf()
+    g2=sns.swarmplot(x='hour', y='count', hue='wspd_cut', data=df_withweather)
+    g2.set(xlabel="Hour within a Day", ylabel="Number of Cyclists passing the Counter")
+    plt.show()
+
+plot_weather(df_withweather)

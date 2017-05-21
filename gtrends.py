@@ -54,11 +54,11 @@ ax2.set_ylabel("main trend")
 # make these tick labels invisible
 plt.setp(ax2.get_xticklabels(), visible=False)
 
-# Plot the seasonal trends
+# Plot the seasonal variation
 ax3 = fig.add_subplot(313, sharex=ax1)
 ax3.plot(CPH.seasonal)
 ax3.plot(AMS.seasonal)
-ax3.set_ylabel("seasonal trend")
+ax3.set_ylabel("seasonal variation")
 
-plt.show()
-#plt.savefig('out/gtrends_bikerental.png')
+#plt.show()
+plt.savefig('out/gtrends_bikerental.png')
