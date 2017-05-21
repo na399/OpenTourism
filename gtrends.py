@@ -17,7 +17,7 @@ def ts_analysis(city):
     df_city = df_gtrends[df_gtrends.city == city]
     df_city.search += 1
     df_city = df_city.set_index(df_city.week) 
-    df_city.search = pd.rolling_mean(df_city.search, window=5)
+    df_city.search = df_city.search.rolling(window=10, center=False).mean()
     df_city = df_city.dropna(subset=['search'])
     
     # rcParams['figure.figsize'] = 11, 13
