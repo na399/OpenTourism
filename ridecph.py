@@ -32,12 +32,16 @@ import xgboost as xgb
 
 from sklearn.linear_model import Ridge, RidgeCV, ElasticNet, LassoCV, LassoLarsCV
 from sklearn.model_selection import cross_val_score
+from sklearn import tree
 
 GMAPS_KEY = 'your API key here'
 
 MAP = False
 BDAY = False
 WEATHER = False
+ML = True
+LASSO = False
+
 
 # Load the Excel file stats from bike counters
 df_bikes = pd.read_excel('data/counters/cykeltaellinger-2014.xlsx', header=10)
@@ -242,169 +246,186 @@ fig,ax= plt.subplots()
 fig.set_size_inches(20,10)
 sns.heatmap(corrMatt, mask=mask,vmax=.8, square=True,annot=True)
 
+if ML:
 
-# Create dataset for ML
-df_conds = pd.get_dummies(df_withweather.conds)
-df_dataset = pd.merge(df_withweather, df_conds, left_index=True, right_index=True)
-df_data_subset = df_dataset[["date_hour","hour","tempm","hum","wspdm",
-                             "Clear","Drizzle","Fog","Light Drizzle",
-                             "Light Rain","Light Rain Showers","Light Snow",
-                             "Mist", "Mostly Cloudy", "Overcast", "Partly Cloudy",
-                             "Rain", "Rain Showers", "Scattered Clouds", "Snow",
-                             "count"]]
-df_data_subset.hour = df_data_subset.hour.astype(int)
-labels = df_data_subset["count"]
-train = df_data_subset.drop(["date_hour","count"], 1)
-
-# https://www.kaggle.com/currie32/a-model-to-predict-number-of-daily-trips
-# Train the model
-
-X_train, X_test, y_train, y_test = train_test_split(train, labels, test_size=0.2, random_state = 2)
-
-#15 fold cross validation. Multiply by -1 to make values positive.
-#Used median absolute error to learn how many trips my predictions are off by.
-
-def scoring(clf):
-    scores = cross_val_score(clf, X_train, y_train, cv=15, n_jobs=-1, scoring = 'neg_median_absolute_error')
-    print (np.median(scores) * -1)
+    # Create dataset for ML
+    df_conds = pd.get_dummies(df_withweather.conds)
+    df_data_set = pd.merge(df_withweather, df_conds, left_index=True, right_index=True)
+    df_data_subset = df_data_set[["hour","tempm","hum","wspdm","dewptm","pressurem","rain","snow","vism",
+                                 "Clear","Drizzle","Fog","Light Drizzle",
+                                 "Light Rain","Light Rain Showers","Light Snow",
+                                 "Mist", "Mostly Cloudy", "Overcast", "Partly Cloudy",
+                                 "Rain", "Rain Showers", "Scattered Clouds", "Snow",
+                                 "count"]]
+    df_data_subset.hour = df_data_subset.hour.astype(int)
     
+    # Check missing values and fill in by interpolation
+    df_data_subset.isnull().sum()
+    df_data_subset['pressurem'] = df_data_subset['pressurem'].interpolate().astype(int)
+    df_data_subset['vism'] = df_data_subset['vism'].interpolate().astype(int)
+    df_data_subset.isnull().sum()
     
-rfr = RandomForestRegressor(n_estimators = 55,
-                            min_samples_leaf = 3,
-                            random_state = 2,
-                            n_jobs = -1)
-scoring(rfr)
-
-gbr = GradientBoostingRegressor(learning_rate = 0.12,
-                                n_estimators = 150,
+    labels = df_data_subset["count"]
+    train = df_data_subset.drop(["count"], 1)
+    
+    # https://www.kaggle.com/currie32/a-model-to-predict-number-of-daily-trips
+    # Train the model
+    
+    X_train, X_test, y_train, y_test = train_test_split(train, labels, test_size=0.2, random_state = 2)
+    
+    #15 fold cross validation. Multiply by -1 to make values positive.
+    #Used median absolute error to learn how many trips my predictions are off by.
+    
+    def scoring(clf):
+        global X_train, y_train
+        scores = cross_val_score(clf, X_train, y_train, cv=15, n_jobs=-1, scoring = 'neg_median_absolute_error')
+        print (np.median(scores) * -1)
+        
+        
+    rfr = RandomForestRegressor(n_estimators = 55,
+                                min_samples_leaf = 3,
+                                random_state = 2,
+                                n_jobs = -1)
+    scoring(rfr)
+    
+    gbr = GradientBoostingRegressor(learning_rate = 0.12,
+                                    n_estimators = 150,
+                                    max_depth = 8,
+                                    min_samples_leaf = 1,
+                                    random_state = 2)
+    scoring(gbr)
+    
+    dtr = DecisionTreeRegressor(min_samples_leaf = 3,
                                 max_depth = 8,
-                                min_samples_leaf = 1,
                                 random_state = 2)
-scoring(gbr)
-
-dtr = DecisionTreeRegressor(min_samples_leaf = 3,
-                            max_depth = 8,
+    scoring(dtr)
+    
+    abr = AdaBoostRegressor(n_estimators = 100,
+                            learning_rate = 0.1,
+                            loss = 'linear',
                             random_state = 2)
-scoring(dtr)
-
-abr = AdaBoostRegressor(n_estimators = 100,
-                        learning_rate = 0.1,
-                        loss = 'linear',
-                        random_state = 2)
-scoring(abr)
-
-
-# XGBoost
-
-import warnings
-warnings.filterwarnings("ignore")
-
-random_state = 2
-params = {
-        'eta': 0.15,
-        'max_depth': 6,
-        'min_child_weight': 2,
-        'subsample': 1,
-        'colsample_bytree': 1,
-        'verbose_eval': True,
-        'seed': random_state,
-    }
-
-n_folds = 15 #number of Kfolds
-cv_scores = [] #The sum of the mean_absolute_error for each fold.
-early_stopping_rounds = 100
-iterations = 10000
-printN = 50
-fpred = [] #stores the sums of predicted values for each fold.
-
-testFinal = xgb.DMatrix(X_test)
-
-kf = KFold(len(X_train), n_folds=n_folds)
-
-for i, (train_index, test_index) in enumerate(kf):
-    print('\n Fold %d' % (i+1))
-    Xtrain, Xval = X_train.iloc[train_index], X_train.iloc[test_index]
-    Ytrain, Yval = y_train.iloc[train_index], y_train.iloc[test_index]
+    scoring(abr)
     
-    xgtrain = xgb.DMatrix(Xtrain, label = Ytrain)
-    xgtest = xgb.DMatrix(Xval, label = Yval)
-    watchlist = [(xgtrain, 'train'), (xgtest, 'eval')] 
     
-    xgbModel = xgb.train(params, 
-                         xgtrain, 
-                         iterations, 
-                         watchlist,
-                         verbose_eval = printN,
-                         early_stopping_rounds=early_stopping_rounds
-                        )
+    # XGBoost
     
-    scores_val = xgbModel.predict(xgtest, ntree_limit=xgbModel.best_ntree_limit)
-    cv_score = median_absolute_error(Yval, scores_val)
-    print('eval-MSE: %.6f' % cv_score)
-    y_pred = xgbModel.predict(testFinal, ntree_limit=xgbModel.best_ntree_limit)
-    print(xgbModel.best_ntree_limit)
-
-    if i > 0:
-        fpred = pred + y_pred #sum predictions
-    else:
-        fpred = y_pred
-    pred = fpred
-    cv_scores.append(cv_score)
-
-xgb_preds = pred / n_folds #find the average values for the predictions
-score = np.median(cv_scores)
-print('Median error: %.6f' % score)
-
-
-#Train and make predictions with the best models.
-rfr = rfr.fit(X_train, y_train)
-gbr = gbr.fit(X_train, y_train)
-
-rfr_preds = rfr.predict(X_test)
-gbr_preds = gbr.predict(X_test)
-
-#Weight the top models to find the best prediction
-final_preds = rfr_preds*0.325 + gbr_preds*0.331 + xgb_preds*0.344
-print ("hourly error of count:", median_absolute_error(y_test, final_preds))
-
-#Create a plot that ranks the features by importance.
-def plot_importances(model, model_name):
-    importances = model.feature_importances_
-    std = np.std([model.feature_importances_ for feature in model.estimators_],
-                 axis=0)
-    indices = np.argsort(importances)[::-1]    
-
-    # Plot the feature importances of the forest
-    plt.figure(figsize = (8,5))
-    plt.title("Feature importances of " + model_name)
-    plt.bar(range(X_train.shape[1]), importances[indices], color="r", align="center")
-    plt.xticks(range(X_train.shape[1]), indices)
-    plt.xlim([-1, X_train.shape[1]])
-    plt.show()
+    import warnings
+    warnings.filterwarnings("ignore")
     
-# Print the feature ranking
-print("Feature ranking:")
-
-i = 0
-for feature in X_train:
-    print (i, feature)
-    i += 1
+    random_state = 2
+    params = {
+            'eta': 0.15,
+            'max_depth': 6,
+            'min_child_weight': 2,
+            'subsample': 1,
+            'colsample_bytree': 1,
+            'verbose_eval': True,
+            'seed': random_state,
+        }
     
-plot_importances(rfr, "Random Forest Regressor")
-plot_importances(gbr, "Gradient Boosting Regressor")
-
-
-fig,(ax1,ax2)= plt.subplots(ncols=2)
-fig.set_size_inches(12,5)
-sns.distplot(y_test,ax=ax1,bins=50)
-sns.distplot(final_preds,ax=ax2,bins=50)
-
-# https://www.kaggle.com/apapiu/regularized-linear-models
-# LASSO model
-
-model_lasso = LassoCV(alphas = [1, 0.1, 0.001, 0.0005]).fit(X_train, y_train)
-
-coef = pd.Series(model_lasso.coef_, index = X_train.columns)
-
-coef.sort_values().plot(kind = "barh")
-plt.title("Coefficients in the Lasso Model")
+    n_folds = 15 #number of Kfolds
+    cv_scores = [] #The sum of the mean_absolute_error for each fold.
+    early_stopping_rounds = 100
+    iterations = 10000
+    printN = 50
+    fpred = [] #stores the sums of predicted values for each fold.
+    
+    testFinal = xgb.DMatrix(X_test)
+    
+    kf = KFold(len(X_train), n_folds=n_folds)
+    
+    for i, (train_index, test_index) in enumerate(kf):
+        print('\n Fold %d' % (i+1))
+        Xtrain, Xval = X_train.iloc[train_index], X_train.iloc[test_index]
+        Ytrain, Yval = y_train.iloc[train_index], y_train.iloc[test_index]
+        
+        xgtrain = xgb.DMatrix(Xtrain, label = Ytrain)
+        xgtest = xgb.DMatrix(Xval, label = Yval)
+        watchlist = [(xgtrain, 'train'), (xgtest, 'eval')] 
+        
+        xgbModel = xgb.train(params, 
+                             xgtrain, 
+                             iterations, 
+                             watchlist,
+                             verbose_eval = printN,
+                             early_stopping_rounds=early_stopping_rounds
+                            )
+        
+        scores_val = xgbModel.predict(xgtest, ntree_limit=xgbModel.best_ntree_limit)
+        cv_score = median_absolute_error(Yval, scores_val)
+        print('eval-MSE: %.6f' % cv_score)
+        y_pred = xgbModel.predict(testFinal, ntree_limit=xgbModel.best_ntree_limit)
+        print(xgbModel.best_ntree_limit)
+    
+        if i > 0:
+            fpred = pred + y_pred #sum predictions
+        else:
+            fpred = y_pred
+        pred = fpred
+        cv_scores.append(cv_score)
+    
+    xgb_preds = pred / n_folds #find the average values for the predictions
+    score = np.median(cv_scores)
+    print('Median error: %.6f' % score)
+    
+    
+    #Train and make predictions with the best models.
+    rfr = rfr.fit(X_train, y_train)
+    gbr = gbr.fit(X_train, y_train)
+    
+    tree.export_graphviz(rfr, out_file='out/rfr.dot')  
+    
+    rfr_preds = rfr.predict(X_test)
+    gbr_preds = gbr.predict(X_test)
+    
+    #Weight the top models to find the best prediction
+    final_preds = rfr_preds*0.325 + gbr_preds*0.331 + xgb_preds*0.344
+    print ("hourly error of count:", median_absolute_error(y_test, final_preds))
+    
+    #Create a plot that ranks the features by importance.
+    def plot_importances(model, model_name):
+        importances = model.feature_importances_
+        std = np.std([model.feature_importances_ for feature in model.estimators_],
+                     axis=0)
+        indices = np.argsort(importances)[::-1]    
+    
+        # Plot the feature importances of the forest
+        plt.figure(figsize = (8,5))
+        plt.title("Feature importances of " + model_name)
+        plt.bar(range(X_train.shape[1]), importances[indices], color="r", align="center")
+        plt.xticks(range(X_train.shape[1]), indices)
+        plt.xlim([-1, X_train.shape[1]])
+        plt.show()
+        
+    # Print the feature ranking
+    print("Feature ranking:")
+    
+    i = 0
+    for feature in X_train:
+        print (i, feature)
+        i += 1
+        
+    plot_importances(rfr, "Random Forest Regressor")
+    plot_importances(gbr, "Gradient Boosting Regressor")
+    
+    
+    fig,(ax1,ax2)= plt.subplots(ncols=2)
+    fig.set_size_inches(12,5)
+    sns.distplot(y_test,ax=ax1,bins=50)
+    sns.distplot(final_preds,ax=ax2,bins=50)
+    
+    plt.clf()
+    ax = sns.regplot(x=y_test, y=final_preds)
+    
+    
+if LASSO:
+    
+    # https://www.kaggle.com/apapiu/regularized-linear-models
+    # LASSO model
+    
+    model_lasso = LassoCV(alphas = [1, 0.1, 0.001, 0.0005]).fit(X_train, y_train)
+    
+    coef = pd.Series(model_lasso.coef_, index = X_train.columns)
+    
+    coef.sort_values().plot(kind = "barh")
+    plt.title("Coefficients in the Lasso Model")
